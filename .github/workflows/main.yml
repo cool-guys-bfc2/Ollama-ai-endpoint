@@ -1,0 +1,37 @@
+name: Ollama Cloud Endpoint
+
+on: [workflow_dispatch]
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest # Forces GitHub-managed hosting, NOT self-hosted
+
+    steps:
+      - name: Install & Start Ollama
+        run: |
+          curl -fsSL https://ollama.com | sh
+          OLLAMA_HOST=0.0.0.0:11434 OLLAMA_ORIGINS=* ollama serve > /dev/null 2>&1 &
+          sleep 5
+          ollama pull llama3.2:1b
+
+      - name: Open ngrok Tunnel
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+        run: |
+          curl -s https://amazonaws.com | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt-get update && sudo apt-get install ngrok
+          
+          ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+          ngrok http 11434 --log=stdout > /dev/null 2>&1 &
+          sleep 5
+          
+          PUBLIC_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+          echo "🚀 PUBLIC ENDPOINT: $PUBLIC_URL"
+          echo "OLLAMA_URL=$PUBLIC_URL" >> $GITHUB_ENV
+
+      - name: Verify Endpoint
+        run: |
+          curl -X POST "${{ env.OLLAMA_URL }}/api/generate" \
+            -H "Content-Type: application/json" \
+            -d '{"model": "llama3.2:1b", "prompt": "Say: Ready!", "stream": false}'
