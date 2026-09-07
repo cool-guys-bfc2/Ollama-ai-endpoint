@@ -1,37 +1,136 @@
-name: Ollama Cloud Endpoint
+name: Cloud Minecraft Bedrock Server
 
-on: [workflow_dispatch]
+on:
+  workflow_dispatch:
+    inputs:
+      gamertag:
+        description: 'Xbox Live Gamertag to grant Server Operator (OP)'
+        required: true
+        default: 'YourGamertagHere'
 
 jobs:
-  launch:
-    runs-on: ubuntu-latest # Forces GitHub-managed hosting, NOT self-hosted
+  launch-bedrock:
+    runs-on: ubuntu-latest # Forces GitHub cloud hosting infrastructure, NOT self-hosted
 
     steps:
-      - name: Install & Start Ollama
-        run: |
-          curl -fsSL https://ollama.com | sh
-          OLLAMA_HOST=0.0.0.0:11434 OLLAMA_ORIGINS=* ollama serve > /dev/null 2>&1 &
-          sleep 5
-          ollama pull llama3.2:1b
+      - name: Checkout Repository Files
+        uses: actions/checkout@v4
 
-      - name: Open ngrok Tunnel
+      - name: Download & Extract Bedrock Dedicated Server
+        run: |
+          sudo apt-get update && sudo apt-get install -y unzip curl jq libcurl4 python3
+          mkdir server && cd server
+          
+          # Fetch the dynamic Linux Bedrock URL natively from Mojang APIs
+          DOWNLOAD_URL=$(curl -s https://minecraft-services.net | jq -r '.result.links[] | select(.downloadType=="serverBedrockLinux") | .downloadUrl')
+          
+          echo "📥 Downloading official Bedrock binaries..."
+          curl -H "User-Agent: Mozilla/4.0 (compatible; BEDROCK-UPDATER)" -L "$DOWNLOAD_URL" -o bedrock-server.zip
+          unzip bedrock-server.zip && rm bedrock-server.zip
+          chmod +x bedrock_server
+
+      - name: Configure Server, Operator Permissions, and Unpack Add-Ons
+        run: |
+          # 1. Inject the one-file server configuration if it exists
+          if [ -f "server.properties" ]; then cp -f server.properties server/; fi
+          
+          # 2. Extract world target directory name out of properties or fallback to standard default
+          WORLD_NAME=$(grep -E "^level-name=" server/server.properties | cut -d'=' -f2 | tr -d '\r' || echo "Bedrock Level")
+          mkdir -p "server/worlds/${WORLD_NAME}"
+          
+          # 3. Create Admin Operator profile entry
+          echo '[{"permissionLevel": "operator", "xuid": ""}]' > server/permissions.json
+          # Note: If you don't know your XUID, the server natively checks name matching upon connection.
+          # To map via raw name, we'll write a clean JSON block mapping your input tag:
+          python3 -c "
+          import json
+          perm = [{'permissionLevel': 'operator', 'name': '${{ github.event.inputs.gamertag }}'}]
+          with open('server/permissions.json', 'w') as f: json.dump(perm, f, indent=2)
+          "
+          echo "👑 Operator permissions staged for Gamertag: ${{ github.event.inputs.gamertag }}"
+          
+          # 4. Process all Add-On packs sitting in the root directory via embedded script
+          python3 - <<EOF
+          import os, zipfile, json, shutil
+          
+          root_dir = '.'
+          server_dir = 'server'
+          world_dir = f"server/worlds/${WORLD_NAME}"
+          
+          os.makedirs(f"{server_dir}/behavior_packs", exist_ok=True)
+          os.makedirs(f"{server_dir}/resource_packs", exist_ok=True)
+          
+          bp_list, rp_list = [], []
+          
+          # Scan main directory ignoring configuration and hidden system files
+          for file in os.listdir(root_dir):
+              if file.endswith(('.mcaddon', '.mcpack', '.zip')) and not file.startswith('.'):
+                  file_path = os.path.join(root_dir, file)
+                  tmp_extract = os.path.join(root_dir, '_tmp_' + file)
+                  
+                  with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                      zip_ref.extractall(tmp_extract)
+                  
+                  # Scan extracted structures for valid runtime manifests
+                  for root, dirs, files in os.walk(tmp_extract):
+                      if 'manifest.json' in files:
+                          manifest_path = os.path.join(root, 'manifest.json')
+                          with open(manifest_path, 'r') as f:
+                              data = json.load(f)
+                          
+                          header = data.get('header', {})
+                          uuid = header.get('uuid')
+                          version = header.get('version')
+                          pack_type = data.get('modules', [{}])[0].get('type', '')
+                          
+                          folder_name = f"{header.get('name', uuid)}_{uuid}"
+                          entry = {"pack_id": uuid, "version": version}
+                          
+                          if pack_type == 'data': # Behavior Pack
+                              dest = os.path.join(server_dir, 'behavior_packs', folder_name)
+                              bp_list.append(entry)
+                          else: # Resource Pack
+                              dest = os.path.join(server_dir, 'resource_packs', folder_name)
+                              rp_list.append(entry)
+                              
+                          if os.path.exists(dest): shutil.rmtree(dest)
+                          shutil.copytree(root, dest)
+                  
+                  shutil.rmtree(tmp_extract)
+          
+          # Commit manifest mappings back into the target world parameters
+          with open(os.path.join(world_dir, 'world_behavior_packs.json'), 'w') as f:
+              json.dump(bp_list, f, indent=2)
+          with open(os.path.join(world_dir, 'world_resource_packs.json'), 'w') as f:
+              json.dump(rp_list, f, indent=2)
+              
+          print(f"✅ Pack Engine completed: Registered {len(bp_list)} Behavior Pack(s) and {len(rp_list)} Resource Pack(s).")
+          EOF
+
+      - name: Open ngrok UDP Tunnel
         env:
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
         run: |
+          # Quick install of proxy daemon
           curl -s https://amazonaws.com | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
           echo "deb https://amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
           sudo apt-get update && sudo apt-get install ngrok
           
+          # Initialize proxy agent bound to standard Bedrock UDP socket
           ngrok config add-authtoken "$NGROK_AUTHTOKEN"
-          ngrok http 11434 --log=stdout > /dev/null 2>&1 &
+          ngrok udp 19132 --log=stdout > /dev/null 2>&1 &
           sleep 5
           
-          PUBLIC_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
-          echo "🚀 PUBLIC ENDPOINT: $PUBLIC_URL"
-          echo "OLLAMA_URL=$PUBLIC_URL" >> $GITHUB_ENV
+          # Output connection parameters cleanly into workflow log panels
+          PUBLIC_ADDRESS=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels.public_url' | sed 's/udp:\/\///')
+          echo "================================================="
+          echo "🎮 MINECRAFT BEDROCK ONLINE CONNECTIONS ACTIVE"
+          echo "🌐 SERVER IP/DOM: $(echo $PUBLIC_ADDRESS | cut -d':' -f1)"
+          echo "🔌 PORT NUMBER  : $(echo $PUBLIC_ADDRESS | cut -d':' -f2)"
+          echo "================================================="
 
-      - name: Verify Endpoint
+      - name: Run Dedicated Bedrock Server Instance
         run: |
-          curl -X POST "${{ env.OLLAMA_URL }}/api/generate" \
-            -H "Content-Type: application/json" \
-            -d '{"model": "llama3.2:1b", "prompt": "Say: Ready!", "stream": false}'
+          cd server
+          # Start engine instance passing environment library links
+          LD_LIBRARY_PATH=. ./bedrock_server
