@@ -25,7 +25,7 @@ jobs:
           DOWNLOAD_URL=$(curl -s https://minecraft-services.net | jq -r '.result.links[] | select(.downloadType=="serverBedrockLinux") | .downloadUrl')
           
           echo "📥 Downloading official Bedrock binaries..."
-          curl -H "User-Agent: Mozilla/4.0 (compatible; BEDROCK-UPDATER)" -L "$DOWNLOAD_URL" -o bedrock-server.zip
+          curl -H "User-Agent: Mozilla/4.0 (compatible; BEDROCK-UPDATER)" -L "https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.45.1.zip" -o bedrock-server.zip
           unzip bedrock-server.zip && rm bedrock-server.zip
           chmod +x bedrock_server
 
